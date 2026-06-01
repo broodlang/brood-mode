@@ -175,23 +175,18 @@ See `imenu-generic-expression'.")
 ;;; Font lock
 
 (defconst brood-special-forms
-  '("if" "when" "unless" "cond" "do" "let" "let*" "letrec" "fn" "lambda"
-    "and" "or" "quote" "quasiquote" "binding"
-    "match" "match*" "try" "catch" "throw" "error" "receive"
-    "dolist" "doseq" "dotimes" "for"
-    "spawn" "spawn-link" "remote-spawn" "remote-spawn-sync"
-    "with-out-str" "bench"
-    "->" "->>")
-  "Brood special forms and core control/binding macros to highlight.
-Only eleven are true evaluator special forms — `quote', `if', `do', `def',
-`fn'/`lambda', `quasiquote', `defmacro', `let', `let*', `letrec' (the `def…'
-heads are highlighted by the definition rule, not this list).  Everything
-else here is a core macro from `std/prelude.blsp' (`when', `unless', `cond',
-`match'/`match*', `try'/`catch', `receive', `binding', `and'/`or', the
-`dolist'/`doseq'/`dotimes'/`for' iteration macros, the `spawn'/`spawn-link'/
-`remote-spawn'/`remote-spawn-sync' process macros, `with-out-str', `bench',
-and the `->'/`->>' threading macros).  Brood has no `set!', `while', `loop',
-or `case'.")
+  '("if" "do" "fn" "lambda" "let" "let*" "letrec" "quote" "quasiquote"
+    "when" "unless" "cond" "and" "or" "match" "match*" "try" "catch" "throw"
+    "receive" "binding" "dolist" "doseq" "dotimes" "for" "->" "->>"
+    "spawn" "spawn-link" "remote-spawn" "remote-spawn-sync" "error"
+    "with-out-str" "bench")
+  "Brood special forms and core macros to highlight as control keywords.
+The canonical set the kernel reports via `(special-forms)' — shared with the
+LSP and the REPL highlighter (ADR-092).  GENERATED: regenerate with `nest
+grammar emacs' in the brood repo; do not hand-edit.  A new special form belongs
+in the kernel's `SPECIAL_FORMS', then regenerate, so every editor stays in sync.
+The `def…' heads are highlighted by the definition rule, not this list.  Brood
+has no `set!', `while', `loop', or `case'.")
 
 (defvar brood-font-lock-keywords
   (list
