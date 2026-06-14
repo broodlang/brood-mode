@@ -822,6 +822,74 @@ Editing commands are similar to those of `lisp-mode'.
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.blsp\\'" . brood-mode))
 
+;;; BML — Hatch's HTML-flavoured template surface (`.bml')
+;;
+;; A `.bml' file is HTML plus `{expr}' interpolation and the `:if'/`:for'
+;; directive attributes; it compiles to Brood Hiccup (`web/bml').  This mode
+;; fontifies the markup and reuses `brood-font-lock-keywords' for the Brood
+;; expressions embedded in `{…}' — the font-lock counterpart to the
+;; tree-sitter grammar's brood-into-`{…}' injection.
+
+(defvar brood-bml-mode-syntax-table
+  (let ((st (make-syntax-table)))
+    ;; Lists/vectors/maps balance for navigation inside interpolations.
+    (modify-syntax-entry ?\( "()" st)
+    (modify-syntax-entry ?\) ")(" st)
+    (modify-syntax-entry ?\[ "(]" st)
+    (modify-syntax-entry ?\] ")[" st)
+    (modify-syntax-entry ?{  "(}" st)
+    (modify-syntax-entry ?}  "){" st)
+    ;; Strings: HTML attribute values and Brood strings inside `{…}'.
+    (modify-syntax-entry ?\" "\"" st)
+    (modify-syntax-entry ?\\ "\\" st)
+    ;; Tag/attribute punctuation.  `;' is punctuation, not a comment — it
+    ;; occurs in inline CSS (`style="…;…"').
+    (dolist (ch '(?< ?> ?/ ?= ?\;))
+      (modify-syntax-entry ch "." st))
+    ;; Brood symbol constituents so `{…}' expressions read as in `brood-mode'
+    ;; (kebab-case names, `:keywords', predicate suffixes).
+    (dolist (ch '(?+ ?- ?* ?! ?? ?% ?_ ?& ?^ ?. ?:))
+      (modify-syntax-entry ch "_" st))
+    st)
+  "Syntax table for `brood-bml-mode'.")
+
+(defvar brood-bml-font-lock-keywords
+  (append
+   (list
+    ;; HTML comments.
+    '("<!--\\(?:.\\|\n\\)*?-->" 0 font-lock-comment-face t)
+    ;; Tag names:  <tag …  and  </tag>.
+    '("</?\\([a-zA-Z][a-zA-Z0-9-]*\\)" 1 font-lock-function-name-face)
+    ;; Directive attributes (`:if'/`:for') — highlighted before the generic
+    ;; attribute rule so they read as control keywords.
+    '("\\(:\\(?:if\\|for\\)\\)[ \t]*=" 1 font-lock-keyword-face)
+    ;; Attribute names: an identifier immediately before `='.
+    '("\\([a-zA-Z_:][a-zA-Z0-9_:-]*\\)[ \t]*=" 1 font-lock-variable-name-face)
+    ;; `@name' assign shorthand — (get model :name) inside `{…}'.
+    '("@[a-zA-Z_][a-zA-Z0-9_?!-]*" 0 font-lock-variable-name-face)
+    ;; Interpolation braces.
+    '("[{}]" 0 font-lock-preprocessor-face))
+   ;; Embedded Brood: special forms, def heads, `:keywords', constants — the
+   ;; same rules `brood-mode' uses, applied inside `{…}'.
+   brood-font-lock-keywords)
+  "Font-lock for `brood-bml-mode': HTML markup plus embedded Brood in {…}.")
+
+;;;###autoload
+(define-derived-mode brood-bml-mode prog-mode "Brood-BML"
+  "Major mode for editing BML templates — Hatch's HTML-flavoured template surface.
+Highlights HTML markup and the Brood expressions embedded in `{…}'
+interpolations (compiled to Hiccup by `web/bml').
+
+\\{brood-bml-mode-map}"
+  :syntax-table brood-bml-mode-syntax-table
+  (setq-local comment-start "<!-- "
+              comment-end " -->"
+              comment-start-skip "<!--[ \t]*")
+  (setq-local font-lock-defaults '((brood-bml-font-lock-keywords))))
+
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.bml\\'" . brood-bml-mode))
+
 (provide 'brood)
 
 ;;; brood.el ends here
