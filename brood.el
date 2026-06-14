@@ -858,6 +858,8 @@ Editing commands are similar to those of `lisp-mode'.
    (list
     ;; HTML comments.
     '("<!--\\(?:.\\|\n\\)*?-->" 0 font-lock-comment-face t)
+    ;; Component tags:  <.name …  and  </.name>  → a type face, to set them apart.
+    '("</?\\.\\([a-zA-Z][a-zA-Z0-9/_-]*\\)" 1 font-lock-type-face)
     ;; Tag names:  <tag …  and  </tag>.
     '("</?\\([a-zA-Z][a-zA-Z0-9-]*\\)" 1 font-lock-function-name-face)
     ;; Directive attributes (`:if'/`:for') — highlighted before the generic
