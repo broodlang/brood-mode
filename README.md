@@ -149,4 +149,5 @@ explicitly (it also starts automatically when you open a `.blsp` file, if
 
 ## License
 
-GPL-3.0-or-later. This mode is also distributed as part of GNU Emacs.
+Licensed under the GNU General Public License v3.0 or later (`GPL-3.0-or-later`);
+see [`LICENSE`](LICENSE). Copyright © 2026 Wilhelm Kirschbaum.
