@@ -278,11 +278,17 @@ the formatter's line-filling or let/map pair-joining — use
 ;; forms that differ from it: the zero-header bodies, and the defun-shaped
 ;; definitions.  (Forms the formatter keeps at 1 — `fn'/`let'/`let*'/`letrec'/
 ;; `binding'/`if'/`when'/`unless'/`match'/`match*'/`case'/`dolist'/`doseq'/
-;; `dotimes'/`for'/`loop'/`catch'/`receive'/`->'/`->>'/`describe'/`test'/`and'/
-;; `or' — need no entry; they get 1 by default.)
-(put 'cond 'brood-indent-function 0)
-(put 'do   'brood-indent-function 0)
-(put 'try  'brood-indent-function 0)
+;; `dotimes'/`for'/`loop'/`catch'/`assoc'/`assoc!'/`->'/`->>'/`describe'/`test'/
+;; `and'/`or' — need no entry; they get 1 by default.)
+(put 'cond    'brood-indent-function 0)
+(put 'do      'brood-indent-function 0)
+(put 'try     'brood-indent-function 0)
+;; `receive' and the `project' manifest are zero-header too: every clause /
+;; key-value rides its own body line at +2, never a first clause on the head
+;; line (which the default of 1 would indent at +4 on a continuation).  These
+;; match `*format-headers*' — `receive 0' and `project 0'.
+(put 'receive 'brood-indent-function 0)
+(put 'project 'brood-indent-function 0)
 ;; `defn'/`defmacro' keep name + params on the head line (header count 2) and
 ;; indent the body at +2 — i.e. defun-shaped.  Every other `def…' over three
 ;; chars (`def'->no, but `defdyn'/`defmodule'/`defonce'/`defprocess'/`deftest'…)
