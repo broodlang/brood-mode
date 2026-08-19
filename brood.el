@@ -175,18 +175,18 @@ See `imenu-generic-expression'.")
 ;;; Font lock
 
 (defconst brood-special-forms
-  '("if" "do" "fn" "lambda" "let" "let*" "letrec" "quote" "quasiquote"
-    "when" "unless" "cond" "and" "or" "match" "match*" "try" "catch" "throw"
-    "receive" "binding" "dolist" "doseq" "dotimes" "for" "->" "->>"
-    "spawn" "spawn-link" "remote-spawn" "remote-spawn-sync" "error"
-    "with-out-str" "bench")
+  '("if" "do" "fn" "let" "letrec" "quote" "quasiquote" "impl"
+    "when" "unless" "cond" "and" "or" "match" "match*" "case" "comment"
+    "try" "catch" "throw" "receive" "binding" "dolist" "doseq" "dotimes"
+    "for" "->" "->>" "spawn" "spawn-link" "remote-spawn" "remote-spawn-sync"
+    "error" "with-out-str" "with-err-str" "bench")
   "Brood special forms and core macros to highlight as control keywords.
 The canonical set the kernel reports via `(special-forms)' — shared with the
 LSP and the REPL highlighter (ADR-092).  GENERATED: regenerate with `nest
 grammar emacs' in the brood repo; do not hand-edit.  A new special form belongs
 in the kernel's `SPECIAL_FORMS', then regenerate, so every editor stays in sync.
 The `def…' heads are highlighted by the definition rule, not this list.  Brood
-has no `set!', `while', `loop', or `case'.")
+has no `set!', `while', or `loop'.")
 
 (defvar brood-font-lock-keywords
   (list
