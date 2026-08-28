@@ -209,93 +209,232 @@ has no `set!', `while', or `loop'.")
 
 ;;; Indentation
 ;;
-;; Like `scheme-indent-function', this consults a dedicated
-;; `brood-indent-function' symbol property so Brood's indentation rules
-;; do not leak into other Lisp buffers, and so that any "def*" form
-;; (longer than three characters) indents like a `defun' automatically.
+;; The canonical formatter (`nest format', `std/format.blsp') is the source of
+;; truth, and its layout is simpler than Common Lisp's: a broken form puts its
+;; body lines `lisp-body-indent' (2) columns from the opening bracket — never
+;; aligned under the first argument the way `lisp-indent-function' does by
+;; default, and never at 2x for a "distinguished" argument.  Only two shapes
+;; depart from that +2, and both are pair shapes:
+;;
+;;   - PAIR-ALIGNED (+1): a map literal `{k v, k v}' and the bindings list of
+;;     `let' and friends.  Their elements are name/value pairs, one pair per
+;;     line, aligned under the opening element.
+;;   - PAIR-BODY VALUE (+4): in `cond'/`case'/`assoc'/`assoc!'/`project', a
+;;     clause's value drops to its own line when the pair doesn't fit, indented
+;;     +2 from the clause (the formatter's "miser drop").
+;;
+;; So there is no per-form header table here: how many arguments ride the head
+;; line changes what the *formatter* emits, not what column a continuation line
+;; lands in, which is all indentation has to answer.
 
 (defvar calculate-lisp-indent-last-sexp)
 
+(defconst brood-pair-binding-forms
+  '("let" "letrec" "binding" "dotimes" "dolist" "loop")
+  "Forms whose first argument is a bindings list of name/value pairs.
+Mirrors `*format-pair-bindings*' in `std/format.blsp'.  Such a list aligns its
+pairs one column past its open paren, under the first name.")
+
+(defconst brood-pair-body-forms
+  '(("cond" . 0) ("case" . 1) ("assoc" . 1) ("assoc!" . 1) ("project" . 0))
+  "Forms whose body arguments are emitted as pairs, and their header count.
+Mirrors `*format-pair-body*' and `*format-headers*' in `std/format.blsp'.  The
+header count is how many arguments precede the pairs (`cond' has none; `case'
+takes the scrutinee first).  A pair's value, when it drops to its own line,
+indents +2 from the clause — see `brood--pair-body-value-p'.")
+
+(defun brood--head-symbol (open)
+  "The head symbol's name of the list opening at OPEN, or nil.
+Nil when the bracket is not a `(', or its first element is not a symbol."
+  (and (eq (char-after open) ?\()
+       (save-excursion
+         (goto-char (1+ open))
+         (forward-comment (point-max))
+         (and (looking-at "\\(?:\\sw\\|\\s_\\)+")
+              (match-string-no-properties 0)))))
+
+(defun brood--nth-arg-start (open n)
+  "Buffer position where argument N of the list at OPEN starts, or nil.
+Argument 0 is the one after the head."
+  (save-excursion
+    (goto-char (1+ open))
+    (condition-case nil
+        ;; Past the head and N+1 arguments, then back to the last one's start.
+        (progn (forward-sexp (+ n 2))
+               (forward-sexp -1)
+               (point))
+      (error nil))))
+
+(defun brood--parent-open (open opens)
+  "The position of the bracket enclosing OPEN, or nil.
+OPENS is the innermost-first list of open positions (`(elt state 9)' reversed)."
+  (cadr (memql open opens)))
+
+(defun brood--pair-aligned-p (open opens)
+  "Non-nil if the bracket at OPEN aligns its contents under its first element.
+That is a map literal, or the bindings list of a `brood-pair-binding-forms'
+head — the two pair shapes the formatter renders one pair per line.  OPENS is
+the innermost-first list of open positions."
+  (cond
+   ;; `{…}' is a map; `#{…}' is a set, which breaks like a vector (+2).
+   ((eq (char-after open) ?\{) (not (eq (char-before open) ?#)))
+   ((eq (char-after open) ?\()
+    ;; A bindings list has no head of its own — it is recognised by its parent:
+    ;; `(let (a 1 b 2) …)', where it is the FIRST argument of a let-family head.
+    (let ((parent (brood--parent-open open opens)))
+      (and parent
+           (member (brood--head-symbol parent) brood-pair-binding-forms)
+           (eql (brood--nth-arg-start parent 0) open))))))
+
+(defun brood--pair-body-value-p (indent-point open)
+  "Non-nil if the line at INDENT-POINT starts the VALUE half of a clause pair.
+The list at OPEN must have a `brood-pair-body-forms' head, whose body arguments
+are emitted two per line (`cond' test + result, `case' pattern + body); a value
+that will not fit beside its test drops to the next line, indented +2 from it.
+
+This walks the clauses the way the formatter does rather than counting to
+parity,
+because a COMMENT breaks a pair: the formatter emits the clause before it alone
+and starts the next pair after it, so a comment mid-body flips every following
+clause between test and value position."
+  (let ((entry (assoc (brood--head-symbol open) brood-pair-body-forms)))
+    (when entry
+      (save-excursion
+        (goto-char (1+ open))
+        (condition-case nil
+            (let ((value nil) (done nil))
+              ;; Past the head and this form's header arguments (`cond' has none,
+              ;; `case' takes the scrutinee) to the first clause.
+              (forward-sexp (1+ (cdr entry)))
+              (while (not done)
+                (forward-comment (point-max))    ; a comment restarts the pairing
+                (cond
+                 ((>= (point) indent-point) (setq done t))     ; a test starts here
+                 (t
+                  (forward-sexp 1)               ; consume the test
+                  (skip-chars-forward " \t\n\r,")
+                  (cond
+                   ((eobp) (setq done t))
+                   ((eq (char-after) ?\;) nil)   ; comment: this clause stood alone
+                   ((>= (point) indent-point) (setq value t done t))
+                   (t (forward-sexp 1))))))      ; consume the value, next clause
+              value)
+          (error nil))))))
+
+(defun brood--keyword-unit-shift (open opens)
+  "How many columns the formatter's `:keyword value' unit shifts OPEN's line.
+A keyword argument and the form after it are rendered as ONE body item, at the
+body indent — so everything on that line after the keyword sits further right
+than the layout it was measured against:
+
+    (describe \"…\"
+      :isolated (test \"…\"
+        (let (a 1
+              b 2)
+          …)))
+
+The `test' body and the bindings list are both laid out as if `test' began at
+`:isolated' (column six), not where it actually starts (column sixteen).  The
+difference — here ten columns — is that shift, and every bracket on the line is
+measured from its own column minus it.  Zero unless the line begins with a
+keyword argument whose enclosing form is a body: inside a map or a bindings list
+a `:key value' pair is rendered at its true column, and so is a `cond' clause.
+OPENS is the innermost-first list of open positions."
+  (save-excursion
+    (goto-char open)
+    (let ((bol (line-beginning-position)))
+      (goto-char bol)
+      (skip-chars-forward " \t")
+      (let ((container (seq-find (lambda (o) (< o bol)) opens))
+            (keyword-column (current-column)))
+        (if (and (eq (char-after) ?:)
+                 (< (point) open)
+                 container
+                 (eq (char-after container) ?\()
+                 (not (brood--pair-aligned-p container opens))
+                 (not (assoc (brood--head-symbol container) brood-pair-body-forms))
+                 (condition-case nil (progn (forward-sexp 1) t) (error nil))
+                 (progn (skip-chars-forward " \t")
+                        (and (<= (point) open) (not (eolp)))))
+            (- (current-column) keyword-column)
+          0)))))
+
+(defun brood--logical-open-column (open opens)
+  "The column the formatter lays out the body of the bracket at OPEN from.
+OPENS is the innermost-first list of enclosing open positions.  The answer is
+OPEN's own column, less any `brood--keyword-unit-shift' its line carries."
+  (- (save-excursion (goto-char open) (current-column))
+     (brood--keyword-unit-shift open opens)))
+
 (defun brood-indent-function (indent-point state)
-  "Brood mode function for the value of `lisp-indent-function'.
-Mirrors the layout policy of the canonical formatter (`nest format',
-`std/format.blsp'): a fixed number of *header* arguments ride on the head
-line and the body indents `lisp-body-indent' (2) columns from the open
-paren — never aligned under the first argument the way `lisp-indent-function'
-does by default.
+  "Brood mode function for the variable `lisp-indent-function'.
+Reproduces the columns `nest format' (`std/format.blsp') emits, so
+\\[indent-for-tab-command] leaves already-formatted code untouched: a body line
+indents `lisp-body-indent' columns from its opening bracket, a pair-aligned
+bracket's contents one column past it, and a dropped pair value +2 from its
+clause.  It does not perform the formatter's line-filling or pair-joining — use
+\\[brood-format-buffer] for output byte-identical to `nest format'.
 
-The header count comes from the `brood-indent-function' symbol property
-\(an integer N, or `defun' for a definition).  Any `def…' operator longer
-than three characters indents like a defun automatically.  Every other
-form — including an ordinary function call and a data list/vector/map —
-defaults to a single header argument, the formatter's generic shape:
+INDENT-POINT and STATE are as for the variable `lisp-indent-function'."
+  (let* ((open (elt state 1))
+         (opens (reverse (elt state 9)))
+         (open-column (brood--logical-open-column open opens)))
+    (cond
+     ((brood--pair-aligned-p open opens) (1+ open-column))
+     ((brood--pair-body-value-p indent-point open)
+      (+ open-column (* 2 lisp-body-indent)))
+     (t (+ open-column lisp-body-indent)))))
 
-    (head arg1
-      arg2
-      arg3)
+(defun brood--calculate-indent (&optional pos)
+  "The column the line at POS should be indented to, or nil to leave it alone.
+Nil means the line starts inside a string.  Unlike `calculate-lisp-indent' this
+always asks `brood-indent-function': the Emacs original has branches that answer
+without calling the hook at all — notably \"the line follows the open bracket
+directly\", which aligns one column in — and those answers are Common Lisp's, not
+`nest format's."
+  (save-excursion
+    (when pos (goto-char pos))
+    (beginning-of-line)
+    (let ((state (syntax-ppss (point))))
+      (cond
+       ;; Inside a string (a multi-line docstring): its columns are content.
+       ((nth 3 state) nil)
+       ;; A top-level form starts at column 0.
+       ((null (nth 1 state)) 0)
+       ;; A line that begins with the closing bracket sits at the column the
+       ;; matching OPEN was laid out from — the formatter drops a delimiter to
+       ;; its own line only when the body ends in a comment, and puts it there.
+       ((save-excursion (skip-chars-forward " \t") (looking-at "[])}]"))
+        (brood--logical-open-column (nth 1 state) (reverse (nth 9 state))))
+       (t (brood-indent-function (point) state))))))
 
-INDENT-POINT and STATE are as for `lisp-indent-function'.
-
-This matches the formatter's indentation *columns* for already-formatted
-code, so \\[indent-for-tab-command] leaves it untouched; it does not perform
-the formatter's line-filling or let/map pair-joining — use
-\\[brood-format-buffer] for output byte-identical to `nest format'."
-  (let ((normal-indent (current-column)))
-    (goto-char (1+ (elt state 1)))
-    (parse-partial-sexp (point) calculate-lisp-indent-last-sexp 0 t)
-    (if (and (elt state 2)
-             (not (looking-at "\\sw\\|\\s_")))
-        ;; The head of the form is not a symbol (a data list/vector/map, or a
-        ;; nested head).  The formatter still indents the body at +2 from the
-        ;; open bracket rather than aligning under the first element.
-        (+ (save-excursion (goto-char (elt state 1)) (current-column))
-           lisp-body-indent)
-      (let ((function (buffer-substring (point)
-                                        (progn (forward-sexp 1) (point))))
-            method)
-        (setq method (get (intern-soft function) 'brood-indent-function))
-        (cond ((or (eq method 'defun)
-                   (and (null method)
-                        (> (length function) 3)
-                        (string-match "\\`def" function)))
-               (lisp-indent-defform state indent-point))
-              ((integerp method)
-               (lisp-indent-specform method state
-                                     indent-point normal-indent))
-              (method
-               (funcall method state indent-point normal-indent))
-              ;; Default: one header arg, body at +2 — the formatter's shape
-              ;; for an ordinary call (it does not align under the first arg).
-              (t
-               (lisp-indent-specform 1 state indent-point normal-indent)))))))
-
-;; The formatter (`std/format.blsp', the `*format-headers*' table) is the
-;; source of truth for how many *header* arguments ride on the first line when
-;; a form breaks; the body always indents `lisp-body-indent' (2) columns from
-;; the open paren.  A header count of N is `brood-indent-function' = N.  The
-;; default for any unlisted form is 1 — one header arg, the formatter's
-;; generic-call shape (see `brood-indent-function') — so we record only the
-;; forms that differ from it: the zero-header bodies, and the defun-shaped
-;; definitions.  (Forms the formatter keeps at 1 — `fn'/`let'/`let*'/`letrec'/
-;; `binding'/`if'/`when'/`unless'/`match'/`match*'/`case'/`dolist'/`doseq'/
-;; `dotimes'/`for'/`loop'/`catch'/`assoc'/`assoc!'/`->'/`->>'/`describe'/`test'/
-;; `and'/`or' — need no entry; they get 1 by default.)
-(put 'cond    'brood-indent-function 0)
-(put 'do      'brood-indent-function 0)
-(put 'try     'brood-indent-function 0)
-;; `receive' and the `project' manifest are zero-header too: every clause /
-;; key-value rides its own body line at +2, never a first clause on the head
-;; line (which the default of 1 would indent at +4 on a continuation).  These
-;; match `*format-headers*' — `receive 0' and `project 0'.
-(put 'receive 'brood-indent-function 0)
-(put 'project 'brood-indent-function 0)
-;; `defn'/`defmacro' keep name + params on the head line (header count 2) and
-;; indent the body at +2 — i.e. defun-shaped.  Every other `def…' over three
-;; chars (`def'->no, but `defdyn'/`defmodule'/`defonce'/`defprocess'/`deftest'…)
-;; also indents as a defun via the length>3 / "def" prefix rule in
-;; `brood-indent-function'; the two below are named for clarity.
-(put 'defn     'brood-indent-function 'defun)
-(put 'defmacro 'brood-indent-function 'defun)
+(defun brood-indent-line (&optional indent)
+  "Indent the current line as Brood code, INDENT overriding the computation.
+Like `lisp-indent-line', except for two Emacs Lisp conventions Brood does not
+share.  A COMMENT is indented as code: Emacs reserves `comment-column' for a `;'
+comment and column 0 for a `;;;' one, while `nest format' puts every comment at
+the indentation of the code around it, whatever its semicolon count — following
+the Emacs convention here made \\[indent-region] shove every `;' comment in a
+formatted file out to column 40.  And the column comes from
+`brood--calculate-indent' rather than `calculate-lisp-indent'."
+  (interactive)
+  (let ((pos (- (point-max) (point)))
+        (indent (or indent (brood--calculate-indent)))
+        (beg (progn (beginning-of-line) (point)))
+        shift-amt)
+    (skip-chars-forward " \t")
+    (if (null indent)
+        ;; The line starts inside a string — leave it exactly as it is.
+        (goto-char (- (point-max) pos))
+      (when (listp indent) (setq indent (car indent)))
+      (setq shift-amt (- indent (current-column)))
+      (unless (zerop shift-amt)
+        (delete-region beg (point))
+        (indent-to indent))
+      ;; If point was inside the line's indentation it now sits after it; else
+      ;; restore it (`lisp-indent-line's contract).
+      (when (> (- (point-max) pos) (point))
+        (goto-char (- (point-max) pos))))))
 
 ;;; Running Brood — shared configuration
 
@@ -378,7 +517,8 @@ Entry runs the hooks `comint-mode-hook' and `inferior-brood-mode-hook'."
   (setq comint-get-old-input #'brood-get-old-input)
   ;; Edit/indent Brood in the REPL like in a source buffer.
   (set-syntax-table brood-mode-syntax-table)
-  (setq-local lisp-indent-function #'brood-indent-function))
+  (setq-local lisp-indent-function #'brood-indent-function
+              indent-line-function #'brood-indent-line))
 
 (defun brood-input-filter (str)
   "Don't save input STR matching `inferior-brood-filter-regexp'."
@@ -570,7 +710,7 @@ directory."
 (defun brood-doc (&optional module)
   "Emit Markdown docs for the current project with `nest doc'.
 With a prefix argument, prompt for a MODULE name to document just that
-module (a baked-in std module, or one on the load-path) instead of the whole
+module (a baked-in std module, or one on `load-path') instead of the whole
 project."
   (interactive
    (list (when current-prefix-arg
@@ -632,8 +772,9 @@ If the counterpart does not exist yet, offer to create it (and its directory)."
 ;; only approximates the layout (see `brood-indent-function'); this is exact.
 
 (defcustom brood-format-on-save nil
-  "When non-nil, reformat a `brood-mode' buffer with the canonical formatter
-before saving (added to `before-save-hook' buffer-locally).  A formatter error
+  "Whether to reformat a `brood-mode' buffer before saving it.
+When non-nil the canonical formatter runs from `before-save-hook',
+buffer-locally.  A formatter error
 \(or a missing `brood' binary) is reported but never blocks the save."
   :type 'boolean
   :group 'brood)
@@ -699,9 +840,16 @@ demoted to a message."
 ;; Register the `brood-lsp' server (crates/lsp, the `brood-lsp' binary) with
 ;; Eglot so Brood editing gets diagnostics, completion, hover, signature help,
 ;; a document outline, find-references, document-highlight, rename, semantic
-;; tokens, and go-to-definition (in-file, cross-module, into the standard
-;; library, and to a `require'd module's file) through one server that owns the
-;; language knowledge — see docs/lsp.md.  The contact is a function so a later customization
+;; tokens, inlay hints, and go-to-definition (in-file, cross-module, into the
+;; standard library, and to a `require'd module's file) through one server that
+;; owns the language knowledge — see docs/lsp.md.
+;;
+;; Inlay hints carry two things: parameter names at call sites, and the type the
+;; checker *infers* for each `defn' you have not written a `(sig ...)' for,
+;; rendered after its parameter list.  Eglot draws them in `eglot-inlay-hint-face'
+;; (a `shadow' derivative), which is the subtlety they want; `M-x
+;; eglot-inlay-hints-mode' toggles them per buffer.  The companion code action,
+;; "Declare signature", writes the inferred one into the file as a real `sig'.  The contact is a function so a later customization
 ;; of `brood-eglot-server-program' is honoured at connect time.  If the binary
 ;; isn't built / on PATH yet, `eglot-ensure' (below) just warns rather than
 ;; erroring, so editing still works without it.
@@ -719,6 +867,11 @@ during development), set the car to a build, e.g.
 The car of `brood-eglot-server-program', expanded if it looks like a path."
   (cons (brood--program (car brood-eglot-server-program))
         (cdr brood-eglot-server-program)))
+
+;; Declared, not required: the `with-eval-after-load' body runs only once Eglot
+;; is loaded, and this keeps a byte-compile of this file alone from reading the
+;; reference as a free variable.
+(defvar eglot-server-programs)
 
 (with-eval-after-load 'eglot
   (add-to-list 'eglot-server-programs '(brood-mode . brood--eglot-contact)))
@@ -786,7 +939,7 @@ All commands in `lisp-mode-shared-map' are inherited by this map."
     ["Switch to REPL" brood-switch-to-repl]
     ["Run Brood REPL" run-brood]
     "--"
-    ["Indent Line" lisp-indent-line]
+    ["Indent Line" indent-for-tab-command]
     ["Indent Region" indent-region :enable mark-active]
     ["Comment Out Region" comment-region :enable mark-active]))
 
@@ -803,7 +956,15 @@ Editing commands are similar to those of `lisp-mode'.
               comment-add 1
               comment-use-syntax t
               parse-sexp-ignore-comments t)
-  (setq-local lisp-indent-function #'brood-indent-function)
+  (setq-local lisp-indent-function #'brood-indent-function
+              indent-line-function #'brood-indent-line
+              ;; `lisp-indent-region' would re-apply Emacs' comment conventions
+              ;; that `brood-indent-line' exists to avoid; nil makes
+              ;; `indent-region' go line by line through it.
+              indent-region-function nil
+              ;; `nest format' indents with spaces only — a tab in a .blsp file
+              ;; is never what the canonical layout would have written.
+              indent-tabs-mode nil)
   (setq-local imenu-case-fold-search t
               imenu-generic-expression brood-imenu-generic-expression
               imenu-syntax-alist '(("+-*/.<>=?!$%_&~^:" . "w")))
