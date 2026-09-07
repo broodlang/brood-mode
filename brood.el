@@ -178,8 +178,7 @@ See `imenu-generic-expression'.")
   '("if" "do" "fn" "let" "letrec" "quote" "quasiquote" "impl"
     "when" "unless" "cond" "and" "or" "match" "match*" "case" "comment"
     "try" "catch" "throw" "receive" "binding" "dolist" "doseq" "dotimes"
-    "for" "->" "->>" "spawn" "spawn-link" "remote-spawn" "remote-spawn-sync"
-    "error" "with-out-str" "with-err-str" "bench")
+    "for" "->" "spawn" "spawn-link" "error" "with-out-str" "with-err-str")
   "Brood special forms and core macros to highlight as control keywords.
 The canonical set the kernel reports via `(special-forms)' — shared with the
 LSP and the REPL highlighter (ADR-092).  GENERATED: regenerate with `nest
@@ -187,6 +186,74 @@ grammar emacs' in the brood repo; do not hand-edit.  A new special form belongs
 in the kernel's `SPECIAL_FORMS', then regenerate, so every editor stays in sync.
 The `def…' heads are highlighted by the definition rule, not this list.  Brood
 has no `set!', `while', or `loop'.")
+
+(defconst brood-doc-forms
+  '(("defmacro" . fn) ("defability" . head) ("defmodule" . head)
+    ("defserver" . fn) ("defn" . fn) ("defn-" . fn))
+  "Brood `def…' heads whose form carries a docstring, as (HEAD . KIND).
+KIND is `fn' when the head builds a function — there a lone trailing string is
+the return value, not documentation — or `head' when the docstring may be the
+form's last element.  GENERATED: regenerate with `nest grammar emacs' in the
+brood repo; do not hand-edit.  The canonical list is the kernel's `(doc-forms)',
+shared with the LSP's semantic tokens and the VS Code / tree-sitter grammars, so
+a docstring reads the same in every editor.")
+
+(defun brood--doc-string-p (list-beginning string-start)
+  "Non-nil if the string at STRING-START documents the form at LIST-BEGINNING.
+A docstring and a string value are the same TOKEN — only position separates them
+(`brood-doc-forms'): the string right after the name, or after the parameter
+list, of a doc-carrying `def…' form.  With one asymmetry, which is exactly the
+confusing case: a function whose body is a LONE string RETURNS that string, so
+`(defn greeting () \"hello\")' is a value and only the first string of
+`(defn greeting () \"Doc.\" \"hello\")' is documentation.  A `defmodule' has no
+body to follow its docstring, so there the last form may well be the doc."
+  (when list-beginning
+    (save-excursion
+      (goto-char list-beginning)
+      (when (looking-at "([ \t\n]*\\(\\(?:\\sw\\|\\s_\\)+\\)")
+        (let ((kind (cdr (assoc (match-string-no-properties 1) brood-doc-forms))))
+          (when kind
+            (let ((count 0) (parameters nil) (reached nil))
+              (goto-char (1+ list-beginning))
+              (condition-case nil
+                  (progn
+                    (forward-comment (point-max))
+                    (while (< (point) string-start)
+                      (when (and (= count 2) (memq (char-after) '(?\( ?\[)))
+                        (setq parameters t))
+                      (forward-sexp 1)
+                      (setq count (1+ count))
+                      (forward-comment (point-max)))
+                    (setq reached (= (point) string-start)))
+                (error nil))
+              (and reached
+                   ;; third form, or fourth when a parameter list comes between
+                   (or (= count 2) (and (= count 3) parameters))
+                   (or (eq kind 'head)
+                       (brood--form-follows-p string-start))))))))))
+
+(defun brood--form-follows-p (string-start)
+  "Non-nil if another form follows the string at STRING-START in its list."
+  (save-excursion
+    (goto-char string-start)
+    (condition-case nil
+        (progn (forward-sexp 1)
+               (forward-comment (point-max))
+               (not (memq (char-after) '(?\) ?\] ?} nil))))
+      (error nil))))
+
+(defun brood-font-lock-syntactic-face-function (state)
+  "Return the face for the string or comment STATE is inside.
+Like `lisp-font-lock-syntactic-face-function', but with Brood's docstring
+positions (`brood--doc-string-p') in place of Emacs Lisp's `doc-string-elt'
+properties — which Brood's `defn'/`defmodule' do not carry, so every docstring
+used to fontify as an ordinary string value."
+  (if (nth 3 state)
+      (let ((string-start (nth 8 state)))
+        (if (brood--doc-string-p (nth 1 state) string-start)
+            'font-lock-doc-face
+          'font-lock-string-face))
+    'font-lock-comment-face))
 
 (defvar brood-font-lock-keywords
   (list
@@ -284,42 +351,55 @@ the innermost-first list of open positions."
     (let ((parent (brood--parent-open open opens)))
       (and parent
            (member (brood--head-symbol parent) brood-pair-binding-forms)
-           (eql (brood--nth-arg-start parent 0) open))))))
+           (eql (brood--nth-arg-start parent 0) open)
+           ;; …and PARENT is a FORM, not a bindings list that merely begins with
+           ;; the same symbol: in `(letrec (loop (fn (i acc) …)))' the binder is
+           ;; named `loop', so the bindings list reads as a `loop' form and the
+           ;; `(fn …)' bound to it would read as ITS bindings list.
+           (not (brood--pair-aligned-p parent opens)))))))
+
+(defun brood--pair-walk-value-p (from target)
+  "Non-nil if the form at or after TARGET fills a pair's VALUE slot.
+Walks the forms from FROM the way the formatter pairs them — name + value, one
+pair per line — rather than counting to parity, because a COMMENT breaks a pair:
+the formatter emits the form before it alone and starts a fresh pair after it,
+so one comment flips every following form between the two slots."
+  (save-excursion
+    (goto-char from)
+    (condition-case nil
+        (let ((value nil) (done nil))
+          (while (not done)
+            (forward-comment (point-max))     ; a comment restarts the pairing
+            (cond
+             ((>= (point) target) (setq done t))          ; a name starts here
+             (t
+              (forward-sexp 1)                ; consume the name
+              (skip-chars-forward " \t\n\r,")
+              (cond
+               ((eobp) (setq done t))
+               ((eq (char-after) ?\;) nil)    ; comment: the name stood alone
+               ((>= (point) target) (setq value t done t))
+               (t (forward-sexp 1))))))       ; consume the value, next pair
+          value)
+      (error nil))))
 
 (defun brood--pair-body-value-p (indent-point open)
   "Non-nil if the line at INDENT-POINT starts the VALUE half of a clause pair.
 The list at OPEN must have a `brood-pair-body-forms' head, whose body arguments
 are emitted two per line (`cond' test + result, `case' pattern + body); a value
-that will not fit beside its test drops to the next line, indented +2 from it.
-
-This walks the clauses the way the formatter does rather than counting to
-parity,
-because a COMMENT breaks a pair: the formatter emits the clause before it alone
-and starts the next pair after it, so a comment mid-body flips every following
-clause between test and value position."
+that will not fit beside its test drops to the next line, indented +2 from it."
   (let ((entry (assoc (brood--head-symbol open) brood-pair-body-forms)))
     (when entry
-      (save-excursion
-        (goto-char (1+ open))
-        (condition-case nil
-            (let ((value nil) (done nil))
-              ;; Past the head and this form's header arguments (`cond' has none,
-              ;; `case' takes the scrutinee) to the first clause.
-              (forward-sexp (1+ (cdr entry)))
-              (while (not done)
-                (forward-comment (point-max))    ; a comment restarts the pairing
-                (cond
-                 ((>= (point) indent-point) (setq done t))     ; a test starts here
-                 (t
-                  (forward-sexp 1)               ; consume the test
-                  (skip-chars-forward " \t\n\r,")
-                  (cond
-                   ((eobp) (setq done t))
-                   ((eq (char-after) ?\;) nil)   ; comment: this clause stood alone
-                   ((>= (point) indent-point) (setq value t done t))
-                   (t (forward-sexp 1))))))      ; consume the value, next clause
-              value)
-          (error nil))))))
+      (let ((first-clause
+             (save-excursion
+               (goto-char (1+ open))
+               (condition-case nil
+                   ;; Past the head and this form's header arguments (`cond' has
+                   ;; none, `case' takes the scrutinee) to the first clause.
+                   (progn (forward-sexp (1+ (cdr entry))) (point))
+                 (error nil)))))
+        (and first-clause
+             (brood--pair-walk-value-p first-clause indent-point))))))
 
 (defun brood--keyword-unit-shift (open opens)
   "How many columns the formatter's `:keyword value' unit shifts OPEN's line.
@@ -390,8 +470,8 @@ INDENT-POINT and STATE are as for the variable `lisp-indent-function'."
 Nil means the line starts inside a string.  Unlike `calculate-lisp-indent' this
 always asks `brood-indent-function': the Emacs original has branches that answer
 without calling the hook at all — notably \"the line follows the open bracket
-directly\", which aligns one column in — and those answers are Common Lisp's, not
-`nest format's."
+directly\", which aligns one column in — and those answers are Common Lisp's,
+not `nest format's."
   (save-excursion
     (when pos (goto-char pos))
     (beginning-of-line)
@@ -405,7 +485,10 @@ directly\", which aligns one column in — and those answers are Common Lisp's, 
        ;; matching OPEN was laid out from — the formatter drops a delimiter to
        ;; its own line only when the body ends in a comment, and puts it there.
        ((save-excursion (skip-chars-forward " \t") (looking-at "[])}]"))
-        (brood--logical-open-column (nth 1 state) (reverse (nth 9 state))))
+        (let* ((open (nth 1 state))
+               (opens (reverse (nth 9 state)))
+               (column (brood--logical-open-column open opens)))
+          (if (brood--pair-aligned-p open opens) (1+ column) column)))
        (t (brood-indent-function (point) state))))))
 
 (defun brood-indent-line (&optional indent)
@@ -984,7 +1067,7 @@ Editing commands are similar to those of `lisp-mode'.
                 nil nil nil nil
                 (font-lock-mark-block-function . mark-defun)
                 (font-lock-syntactic-face-function
-                 . lisp-font-lock-syntactic-face-function))))
+                 . brood-font-lock-syntactic-face-function))))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.blsp\\'" . brood-mode))

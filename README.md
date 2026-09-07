@@ -6,8 +6,10 @@ extension.
 
 `brood-mode` derives from `lisp-data-mode`, so it inherits Emacs' full
 s-expression machinery (navigation, electric pairs, `forward-sexp`, structural
-editing) and adds Brood-specific syntax, font-lock, and indentation. It also
-bundles the process integration in one file:
+editing) and adds Brood-specific syntax, font-lock, and indentation — including
+a **docstring** face (`font-lock-doc-face`), so a `defn`'s documentation reads
+apart from a string it returns. It also bundles the process integration in one
+file:
 
 - **`run-brood`** — an inferior Brood REPL over comint.
 - **`brood-send-*`** — evaluate the last sexp / definition / region / buffer in
@@ -107,10 +109,15 @@ There are two layers, and they agree:
 - **Auto-indent (TAB, `indent-region`, electric newline)** mirrors the
   formatter's layout policy from `std/format.blsp` — the body of every form
   indents two columns from its open paren (never aligned under the first
-  argument), with a per-form count of header arguments kept on the head line.
-  Re-indenting already-formatted code is a no-op, so editing doesn't fight the
-  formatter. It approximates the layout; it does not perform the formatter's
-  line-filling or `let`/map pair-joining.
+  argument), with two exceptions, both pair shapes: a map literal and a
+  `let`-family bindings list align one column past their bracket, under the
+  first element, and a `cond`/`case` clause's value indents two further when it
+  drops to its own line. Comments indent as code (Emacs' `comment-column` for a
+  `;` and column 0 for a `;;;` are Emacs Lisp conventions Brood does not share),
+  and indentation is spaces only. Re-indenting already-formatted code is a
+  no-op — `indent-region` over the whole Brood standard library and test suite
+  changes nothing — so editing doesn't fight the formatter. It still only
+  *indents*: it does not perform the formatter's line-filling or pair-joining.
 - **`brood-format-buffer` (`C-c C-f`)** is exact. It runs your `brood` binary
   over the in-language `format/format-file`, i.e. the very code behind `nest
   format`, so the result is byte-identical to `nest format` on that file. Set
