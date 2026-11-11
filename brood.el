@@ -176,8 +176,8 @@ See `imenu-generic-expression'.")
 
 (defconst brood-special-forms
   '("if" "do" "fn" "let" "letrec" "quote" "quasiquote" "impl"
-    "when" "unless" "cond" "and" "or" "match" "match*" "case" "comment"
-    "try" "catch" "throw" "receive" "binding" "dolist" "doseq" "dotimes"
+    "when" "cond" "and" "or" "match" "case" "comment"
+    "try" "catch" "throw" "receive" "binding" "doseq"
     "for" "->" "spawn" "spawn-link" "error" "with-out-str" "with-err-str")
   "Brood special forms and core macros to highlight as control keywords.
 The canonical set the kernel reports via `(special-forms)' — shared with the
@@ -297,7 +297,7 @@ used to fontify as an ordinary string value."
 (defvar calculate-lisp-indent-last-sexp)
 
 (defconst brood-pair-binding-forms
-  '("let" "letrec" "binding" "dotimes" "dolist" "loop")
+  '("let" "letrec" "binding" "loop")
   "Forms whose first argument is a bindings list of name/value pairs.
 Mirrors `*format-pair-bindings*' in `std/format.blsp'.  Such a list aligns its
 pairs one column past its open paren, under the first name.")
